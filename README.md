@@ -17,7 +17,7 @@ In both cases, if an [encoded NetBIOS hostname](https://support.microsoft.com/en
 ### Let Volatility know you're using an additional plugin.
 Use the `--plugins` switch to specify the folder containing any additional plugins you wish Volatility to load:
 ```
-$ python vol.py --plugins=/folder/to/ndispktscan -f memory.dmp --profile=Win7SP1x64 ndispktscan
+$ python vol.py --plugins=path/to/ndispktscan -f memory.dmp --profile=Win7SP1x64 ndispktscan
 ```
 ### Switches
 #### --pcap/-p
