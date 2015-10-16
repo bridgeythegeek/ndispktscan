@@ -292,6 +292,19 @@ class NDshScanner(scan.BaseScanner):
         for address in scan.BaseScanner.scan(self, address_space, offset=offset):
             yield address
 
+class MacScanner(scan.BaseScanner):
+    """Scanner for a MAC address followed by IPv4/IPv6 EtherType"""
+
+    def __init__(self, mac):
+        mac = mac.decode('hex')
+        needles = [ mac + '\x08\x00', mac + '\x86\xdd']
+        self.checks = [ ("MultiStringFinderCheck", {'needles':needles}) ]
+        scan.BaseScanner.__init__(self)
+
+    def scan(self, address_space, offset=0):
+        for address in scan.BaseScanner.scan(self, address_space, offset=offset):
+            yield address - 14  # So that we can force it into a _THING object
+
 
 class NDISPktScan(common.AbstractWindowsCommand):
     """Extract the Things from memory"""
@@ -324,6 +337,9 @@ class NDISPktScan(common.AbstractWindowsCommand):
         
         config.add_option('SLACK', short_option = 's', default = False,
                           help = 'Look for slack only', action = 'store_true')
+
+        config.add_option('MAC', short_option = 'm', default = None,
+                          help = 'Source MAC address to find')
 
     @staticmethod    
     def trans_netbios(nb_name):
@@ -412,9 +428,9 @@ class NDISPktScan(common.AbstractWindowsCommand):
         return r.strip('.')
 
     def calculate(self):
-    
+
         if self._config.SLACK and (self._config.DSTS or self._config.PCAP):
-            debug.error('SLACK can\'t be used with PCAP and/or DSTS')
+            debug.error('SLACK can\'t be used with PCAP or DSTS')
     
         # Ensure PCAP file won't overwrite an existing file
         if self._config.PCAP and os.path.exists(self._config.PCAP):
@@ -446,7 +462,10 @@ class NDISPktScan(common.AbstractWindowsCommand):
                     for mod in modules.lsmod(addr_space))
         mod_addrs = sorted(mods.keys())
         
-        scanner = NDshScanner()
+        if self._config.MAC:
+            scanner = MacScanner(self._config.MAC)
+        else:        
+            scanner = NDshScanner()
 
         sessions = []
         hits = []
@@ -468,7 +487,7 @@ class NDISPktScan(common.AbstractWindowsCommand):
                 hits.append(address)
                 module = tasks.find_module(mods, mod_addrs, addr_space.address_mask(address))
                 thing = obj.Object('_THING', vm=session_space, offset=address)
-                if thing.is_valid():
+                if thing.is_valid() or self._config.MAC:
                     raw = session_space.zread(address + 8, 2048)
                     # Parse ethernet's payload
                     if thing.eth.eth_type == 0x0800: # IPv4:
@@ -575,16 +594,24 @@ class NDISPktScan(common.AbstractWindowsCommand):
 
             outfd.write('Found {:,} Things.\n'.format(count))
 
-            # If save to PCAP, write and report
-            if self._config.PCAP:
-                written = pcap_writer.write()
-                outfd.write('Written {:,} records ({:,} bytes) to \'{}\'.\n'.format(
-                    len(pcap_writer.packets), written, pcap_writer.target))
+            # Suggest trying the --mac option
+            if count < 1 and not self._config.MAC:
 
-            # If save to DSTS, write and report
-            if self._config.DSTS:
-                with open(self._config.DSTS, 'w') as dsts_file:
-                    for dst in dsts:
-                        dsts_file.write(dst + '\n')
-                outfd.write('Written {:,} destination IPs to \'{}\'.\n'.format(
-                    len(dsts), self._config.DSTS))
+                outfd.write('Zero-Hits-Tip: Consider the --mac option.\n')
+
+            # Only write the file if we found something
+            if count > 0:
+
+                # If save to PCAP, write and report
+                if self._config.PCAP:
+                    written = pcap_writer.write()
+                    outfd.write('Written {:,} records ({:,} bytes) to \'{}\'.\n'.format(
+                        len(pcap_writer.packets), written, pcap_writer.target))
+
+                # If save to DSTS, write and report
+                if self._config.DSTS:
+                    with open(self._config.DSTS, 'w') as dsts_file:
+                        for dst in dsts:
+                            dsts_file.write(dst + '\n')
+                    outfd.write('Written {:,} destination IPs to \'{}\'.\n'.format(
+                        len(dsts), self._config.DSTS))
