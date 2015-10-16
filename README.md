@@ -4,14 +4,14 @@ NDISPktScan is a plugin for the [Volatility Framework](https://github.com/volati
 ## How does it work?
 The [Network Driver Interface Specification](https://en.wikipedia.org/wiki/Network_Driver_Interface_Specification) is an API for network cards used by Windows (and other OSs). On Windows, the API is implemented by ndis.sys which is a [Kernel Mode driver](https://msdn.microsoft.com/en-us/library/windows/hardware/ff554836%28v=vs.85%29.aspx).
 
-NDIS 6.20, the version used by Windows 7 and Windows Server 2008R2, seems to use a [pool tag](http://blogs.technet.com/b/yongrhee/archive/2009/06/24/pool-tag-list.aspx) of `NDsh`. As such, these pool tags can be found and the data structure that follows parsed.
+NDIS 6.20, the version used by Windows 7 and Windows Server 2008R2, seems to use a [pool tag](http://blogs.technet.com/b/yongrhee/archive/2009/06/24/pool-tag-list.aspx) of `NDsh`. As such, these pool tags can be found, and the data structure that follows, parsed.
 
 ## What information can it get?
 The data stored is actually an Ethernet packet. Consequently, the whole packet can be parsed and, optionally, saved to a PCAP file. The plugin will output at least the source and destination MAC addresses and the [EtherType](https://en.wikipedia.org/wiki/EtherType). If the packet is TCP or UDP over IPv4 or IPv6 (as they often are) the plugin will also output the source and destination IP addresses, the source and destination port numbers, and, for TCP, the TCP flags.
 
-For those with an especially forensic interest, consider the `--slack` option. Each entry seems to be allocated 2048 bytes, therefore, when an entry is reused, if the new data is fewer bytes than what was previously at that position in memory, there is likely slack. The `--slack` option will output only "sensible" data recovered from slack. Typically these are hostnames.
+For those with an especially forensic interest, consider the `--slack` option. Each entry seems to be allocated 2048 bytes, therefore, when an entry is reused, if the new data is fewer bytes than what was previously at that position in memory, there is likely slack. The `--slack` option will output only "sensible" data recovered from slack. Typically these will be hostnames.
 
-In both cases, if an [encoded NetBIOS hostname](https://support.microsoft.com/en-gb/kb/194203) is found, it will be presented encoded followed by the decoded version in brackets.
+In both cases, if an [encoded NetBIOS hostname](https://support.microsoft.com/en-gb/kb/194203) is found, it will be presented encoded, followed by the decoded version in brackets.
 
 ## How do I use it?
 ### Let Volatility know you're using an additional plugin.
