@@ -296,7 +296,6 @@ class MacScanner(scan.BaseScanner):
     """Scanner for a MAC address followed by IPv4/IPv6 EtherType"""
 
     def __init__(self, mac):
-        mac = mac.decode('hex')
         needles = [ mac + '\x08\x00', mac + '\x86\xdd']
         self.checks = [ ("MultiStringFinderCheck", {'needles':needles}) ]
         scan.BaseScanner.__init__(self)
@@ -421,6 +420,16 @@ class NDISPktScan(common.AbstractWindowsCommand):
         return rx.match(maybe)
     
     @staticmethod
+    def validate_mac(mac):
+        """Validate the MAC address option"""
+        
+        mac = mac.replace(':', '')
+        if not re.match('^[a-fA-F0-9]{12}$', mac):
+            return None
+        
+        return mac.decode('hex')
+    
+    @staticmethod
     def tidy_slack(slack):
         """Make the slack data human-friendly"""
         
@@ -431,6 +440,12 @@ class NDISPktScan(common.AbstractWindowsCommand):
 
         if self._config.SLACK and (self._config.DSTS or self._config.PCAP):
             debug.error('SLACK can\'t be used with PCAP or DSTS')
+        
+        # Make sure the MAC address is valid
+        if self._config.MAC:
+            hex_mac = self.validate_mac(self._config.MAC)
+            if not hex_mac:
+                debug.error('Invalid MAC address')
     
         # Ensure PCAP file won't overwrite an existing file
         if self._config.PCAP and os.path.exists(self._config.PCAP):
@@ -463,7 +478,7 @@ class NDISPktScan(common.AbstractWindowsCommand):
         mod_addrs = sorted(mods.keys())
         
         if self._config.MAC:
-            scanner = MacScanner(self._config.MAC)
+            scanner = MacScanner(hex_mac)
         else:        
             scanner = NDshScanner()
 
@@ -599,7 +614,7 @@ class NDISPktScan(common.AbstractWindowsCommand):
 
                 outfd.write('Zero-Hits-Tip: Consider the --mac option.\n')
 
-            # Only write the file if we found something
+            # Only write the files if we found something
             if count > 0:
 
                 # If save to PCAP, write and report
