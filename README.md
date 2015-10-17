@@ -13,6 +13,9 @@ For those with an especially forensic interest, consider the `--slack` option. E
 
 In both cases, if an [encoded NetBIOS hostname](https://support.microsoft.com/en-gb/kb/194203) is found, it will be presented encoded, followed by the decoded version in brackets.
 
+### MAC Mode
+In versions of Windows other than 7 or 2008R2, it is probably worth trying the `--mac` option. This option requires the MAC address from a network card in use when the memory sample was taken. The plugin will then look for the MAC address followed by either the IPv4 or IPv6 EtherType and output any packets found. This approach was seen to be surprisingly successful, although the actual payload of the packet seemed to be missing. That said, a destination IP address and port could still be very informative. 
+
 ## How do I use it?
 ### Let Volatility know you're using an additional plugin.
 Use the `--plugins` switch to specify the folder containing any additional plugins you wish Volatility to load:
@@ -26,6 +29,8 @@ Each found packet will be saved to the PCAP file you specify. The file can then 
 Each target IP address will be saved to the text file you specify. Duplicates will be removed.
 #### --slack/-s
 Look for sensible slack data. Typically hostnames found beyond the current packet.
+#### --mac/-m
+Search for this source MAC address instead of the pool tag. Provide mac address as: `--mac a1b2c3d4e5f6`
 
 ## Sample Output 1
 `$ vol.py --plugins path/to/ndispktscan/ -f memory.dmp --profile Win7SP1x64 ndispktscan --pcap out.pcap --dsts ips.txt`
@@ -79,4 +84,21 @@ Offset (V)         Slack Data
 0x0000fa8002f7cff8 c.bing.com
 0x0000fa8002fe5ff8 cdn.adnxs.com
 Found 44 "sensible" slack items.
+```
+## Sample Output 3
+`$ vol.py --plugins path/to/ndispktscan/ -f memory.dmp --profile Win8SP1x86 ndispktscan --mac 000c29838725`
+```
+Offset (V) Source MAC        Destination MAC   Prot Source IP                               Destination IP                          SPort DPort Flags
+---------- ----------------- ----------------- ---- --------------------------------------- --------------------------------------- ----- ----- -----
+0x85907452 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          65.55.138.111                           49171   443 ACK
+0x8590c45a 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          65.55.138.111                           49171   443 ACK
+0x85913222 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          157.55.240.126                          49177   443 ACK,PSH
+0x85979fba 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          65.55.138.111                           49171   443 ACK
+0x8598037a 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          65.55.138.111                           49171   443 ACK
+0x85982fba 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          23.43.75.27                             49167    80 ACK,RST
+0x85985222 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          65.55.138.111                           49171   443 ACK`
+--SNIP--
+0x88b86aba 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          157.56.194.72                           49410   443 ACK
+0x88b9965a 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          23.67.255.203                           49419    80 ACK,PSH
+Found 97 Things.
 ```
