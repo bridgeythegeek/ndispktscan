@@ -7,19 +7,11 @@ import volatility.obj as obj
 import volatility.plugins.common as common
 import volatility.scan as scan
 import volatility.utils as utils
-import volatility.win32.modules as modules
 import volatility.win32.tasks as tasks
 
 
 # Add some structures
-_thing_types = {
-
-    # Not sure what it is, so let's call it a "thing".
-    '_THING': [ 0x86, {
-        'header': [ 0x00, ['unsigned long']],  # NDsh
-        'ver': [ 0x04, ['unsigned long']],  # 0x00000001 (version?)
-        'eth': [ 0x08, ['_ETHERNET']]  # Always an ethernet packet?
-    }],
+_packet_types = {
 
     # Ethernet Header
     '_ETHERNET': [ 0xE, {
@@ -79,26 +71,6 @@ _thing_types = {
     }]
 }
 
-class _THING(obj.CType):
-
-    # Supported EtherTypes
-    _valid_ethtype = [
-        0x0800, # IPv4
-        0x86dd, # IPv6
-    ]
-
-    def is_valid(self):
-        """Check this is a Thing we can parse"""
-
-        return (self.ver == 1 and self.eth.eth_type in self._valid_ethtype)
-
-    def __str__(self):
-        """Get string representation of Thing"""
-
-        return '<Thing (header={:X}, ver={}, eth={:X})>'.format(
-            self.header, self.ver, self.eth.eth_type)
-    
-
 class _ETHERNET(obj.CType):
 
     @staticmethod
@@ -135,6 +107,7 @@ class _IPv4(obj.CType):
         """Get string representation of IPv4 address"""
 
         return '.'.join(['{}'.format(x) for x in ip])
+
 
 class _IPv6(obj.CType):
     
@@ -179,8 +152,9 @@ class _IPv6(obj.CType):
 
 
 class _UDP(obj.CType):
-    
-    def get_flags(self):
+
+    @staticmethod
+    def get_flags():
         """Get filler in place of TCP flags"""
 
         return '---'
@@ -204,7 +178,7 @@ class _TCP(obj.CType):
         return ','.join(flags)
 
 
-class ThingVTypes(obj.ProfileModification):
+class PacketVTypes(obj.ProfileModification):
     """Add the new vtypes"""
 
     def check(self, profile):
@@ -212,21 +186,21 @@ class ThingVTypes(obj.ProfileModification):
         return m.get('os', None) == 'windows'
 
     def modification(self, profile):
-        profile.vtypes.update(_thing_types)
+        profile.vtypes.update(_packet_types)
 
-        
-class ThingObjectClasses(obj.ProfileModification):
+
+class PacketObjectClasses(obj.ProfileModification):
     """Add the new class definitions"""
 
     def modification(self, profile):
         profile.object_classes.update({
-            '_THING': _THING,
             '_ETHERNET': _ETHERNET,
             '_IPv4': _IPv4,
             '_IPv6': _IPv6,
             '_UDP': _UDP,
             '_TCP': _TCP
         })
+
 
 class PcapWriter:
     """Writes the packets found to a PCAP file"""
@@ -281,7 +255,7 @@ class NDshScanner(scan.BaseScanner):
     # It's on the list, but seems very generic:
     # http://blogs.technet.com/b/yongrhee/archive/2009/06/24/pool-tag-list.aspx
     # Seems to belong to ndis.sys (Network Driver Interface Specification)
-    _MARKER = "NDsh"
+    _MARKER = "NDsh\x01\x00\x00\x00"
 
     def __init__(self):
         needles = [ self._MARKER ]
@@ -291,6 +265,7 @@ class NDshScanner(scan.BaseScanner):
     def scan(self, address_space, offset=0):
         for address in scan.BaseScanner.scan(self, address_space, offset=offset):
             yield address
+
 
 class MacScanner(scan.BaseScanner):
     """Scanner for a MAC address followed by IPv4/IPv6 EtherType"""
@@ -302,11 +277,11 @@ class MacScanner(scan.BaseScanner):
 
     def scan(self, address_space, offset=0):
         for address in scan.BaseScanner.scan(self, address_space, offset=offset):
-            yield address - 14  # So that we can force it into a _THING object
+            yield address - 6  # We've hit on source MAC, but destination MAC is first
 
 
 class NDISPktScan(common.AbstractWindowsCommand):
-    """Extract the Things from memory"""
+    """Extract the packets from memory"""
 
     #ip_proto = {
     #    0x00 : "IPv6 Hop-by-Hop Option",
@@ -435,6 +410,38 @@ class NDISPktScan(common.AbstractWindowsCommand):
         
         r = re.sub('[^A-Za-z0-9_-]', '.', slack)
         return r.strip('.')
+    
+    @staticmethod
+    def gen_session_spaces(addr_space):
+    
+        sessions = []
+        for proc in tasks.pslist(addr_space):
+            sid = proc.SessionId
+            if sid == None or sid in sessions:
+                continue
+
+            session_space = proc.get_process_address_space()
+            if session_space == None:
+                continue
+
+            sessions.append(sid)
+            yield session_space
+    
+    @staticmethod
+    def macfind_ndsh(addr_space, start):
+    
+        macs = set()
+        scanner = NDshScanner()
+        for ss in NDISPktScan.gen_session_spaces(addr_space):
+            for a in scanner.scan(ss, start):
+                e = obj.Object('_ETHERNET', vm=ss, offset=a+8)
+                if e.eth_type == 0x0800 or e.eth_type == 0x86dd:
+                    str_mac = e.make_mac(e.mac_src)
+                    valid_mac = NDISPktScan.validate_mac(str_mac)
+                    if valid_mac:
+                        macs.add(valid_mac)
+        
+        return None if len(macs) < 1 else macs
 
     def calculate(self):
 
@@ -472,72 +479,69 @@ class NDISPktScan(common.AbstractWindowsCommand):
         if start > 0xffff000000000000:
             start = start & 0x0000ffffffffffff
 
-        # Modules so we can map addresses to owners
-        mods = dict((addr_space.address_mask(mod.DllBase), mod)
-                    for mod in modules.lsmod(addr_space))
-        mod_addrs = sorted(mods.keys())
-        
+        macs = set()  # Store the MAC addresses we find
         if self._config.MAC:
-            scanner = MacScanner(hex_mac)
-        else:        
-            scanner = NDshScanner()
-
-        sessions = []
+            macs.add(hex_mac)
+        else:  # No MAC provided, so we'd better try and find one
+            # Attemp 1: NDsh
+            new_macs = self.macfind_ndsh(addr_space, start)
+            if new_macs:
+                for new_mac in new_macs:
+                    macs.add(new_mac)
+        
+        if len(macs) < 1:
+            debug.error('No MAC addresses found.')
+        
         hits = []
-        for proc in tasks.pslist(addr_space):
-            sid = proc.SessionId
-            if sid == None or sid in sessions:
-                continue
-
-            session_space = proc.get_process_address_space()
-            if session_space == None:
-                continue
-
-            sessions.append(sid)
-            for address in scanner.scan(session_space, offset=start):
-                
-                if address in hits:
-                    continue
+        _MAX_SLACK_LENGTH = 128
+        for session_space in self.gen_session_spaces(addr_space):
+        
+            for mac in macs:
             
-                hits.append(address)
-                module = tasks.find_module(mods, mod_addrs, addr_space.address_mask(address))
-                thing = obj.Object('_THING', vm=session_space, offset=address)
-                if thing.is_valid() or self._config.MAC:
-                    raw = session_space.zread(address + 8, 2048)
-                    # Parse ethernet's payload
-                    if thing.eth.eth_type == 0x0800: # IPv4:
-                        eth_payload = obj.Object('_IPv4', vm=session_space,
-                            offset = thing.eth.v() + 0x0E)
-                        end = 14 + eth_payload.length
-                        if self._config.SLACK:
-                            yield address, raw[end:]
-                            continue
-                        raw = raw[:end]
-                    elif thing.eth.eth_type == 0x86dd: # IPv6
-                        eth_payload = obj.Object('_IPv6', vm=session_space,
-                            offset = thing.eth.v() + 0x0E)
-                        end = 14 + 40 + eth_payload.pld_len
-                        if self._config.SLACK:
-                            yield address, raw[end:]
-                            continue
-                        raw = raw[:end]
-                    else:
-                        print "Error(1): Unsupported Ethernet Payload: {}".format(
-                            thing.eth.eth_type)
+                scanner = MacScanner(mac)
+            
+                for address in scanner.scan(session_space, offset=start):
+                    
+                    if address in hits:
                         continue
-                    # Parse ethernet's payload's payload
-                    if eth_payload.is_tcp():
-                        payload = obj.Object('_TCP', vm=session_space,
-                            offset=eth_payload.payload_offset())
-                    elif eth_payload.is_udp():
-                        payload = obj.Object('_UDP', vm=session_space,
-                            offset=eth_payload.payload_offset())
-                    else:
-                        yield raw, thing, eth_payload, None
-                        continue
-                    yield raw, thing, eth_payload, payload
-                #else:
-                #    print '{:#x} Unknown Thing'.format(thing.v())
+                
+                    hits.append(address)
+                    eth = obj.Object('_ETHERNET', vm=session_space, offset=address)
+                    if eth.eth_type == 0x0800 or eth.eth_type == 0x86dd:
+                        
+                        raw = session_space.zread(address, 2048)
+                        
+                        # Parse ethernet's payload
+                        if eth.eth_type == 0x0800: # IPv4:
+                            eth_payload = obj.Object('_IPv4', vm=session_space,
+                                offset = eth.v() + 0x0E)
+                            end = 14 + eth_payload.length
+                            if self._config.SLACK:
+                                yield address, raw[end:end+_MAX_SLACK_LENGTH]
+                                continue
+                            raw = raw[:end]
+                        elif eth.eth_type == 0x86dd: # IPv6
+                            eth_payload = obj.Object('_IPv6', vm=session_space,
+                                offset = eth.v() + 0x0E)
+                            end = 14 + 40 + eth_payload.pld_len
+                            if self._config.SLACK:
+                                yield address, raw[end:end+_MAX_SLACK_LENGTH]
+                                continue
+                            raw = raw[:end]
+                        else:  # This shouldn't happen, but just in case
+                            continue
+                        
+                        # Parse ethernet's payload's payload
+                        if eth_payload.is_tcp():
+                            payload = obj.Object('_TCP', vm=session_space,
+                                offset=eth_payload.payload_offset())
+                        elif eth_payload.is_udp():
+                            payload = obj.Object('_UDP', vm=session_space,
+                                offset=eth_payload.payload_offset())
+                        else:
+                            yield raw, eth, eth_payload, None
+                            continue
+                        yield raw, eth, eth_payload, payload
 
     def render_text(self, outfd, data):
 
@@ -584,35 +588,33 @@ class NDISPktScan(common.AbstractWindowsCommand):
             if self._config.PCAP:
                 pcap_writer = PcapWriter(self._config.PCAP)
 
-            dsts = set()  # Store the destination IPs
+            dsts = set()      # Store the unique destination IPs
+            src_macs = set()  # Store the unique source MACs
             count = 0
-            for raw, t, e, p in data:
+            for raw, eth, epl, pl in data:
                 count += 1
                 
                 if self._config.PCAP:  # Only if save to PCAP
                     pcap_writer.packets.append(raw)
 
-                dst = e.make_ip(e.dst_ip)
-                dsts.add(dst)
+                dst_ip = epl.make_ip(epl.dst_ip)
+                dsts.add(dst_ip)
+                src_mac = eth.make_mac(eth.mac_src)
+                src_macs.add(src_mac)
 
                 self.table_row(outfd,
-                    t.v(),
-                    t.eth.make_mac(t.eth.mac_src),
-                    t.eth.make_mac(t.eth.mac_dst),
-                    '{:#04x}'.format(e.get_proto()),
-                    e.make_ip(e.src_ip),
-                    dst,
-                    p.src_port if p else 'Proto',
-                    p.dst_port if p else 'NotKn',
-                    p.get_flags() if p else 'own'
+                    eth.v(),
+                    src_mac,
+                    eth.make_mac(eth.mac_dst),
+                    '{:#04x}'.format(epl.get_proto()),
+                    epl.make_ip(epl.src_ip),
+                    dst_ip,
+                    pl.src_port if pl else 'Proto',
+                    pl.dst_port if pl else 'NotKn',
+                    pl.get_flags() if pl else 'own'
                 )
 
-            outfd.write('Found {:,} Things.\n'.format(count))
-
-            # Suggest trying the --mac option
-            if count < 1 and not self._config.MAC:
-
-                outfd.write('Zero-Hits-Tip: Consider the --mac option.\n')
+            outfd.write('Found {:,} packets from {:,} MACs.\n'.format(count, len(src_macs)))
 
             # Only write the files if we found something
             if count > 0:
