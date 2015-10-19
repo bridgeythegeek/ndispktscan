@@ -30,7 +30,7 @@ Each target IP address will be saved to the text file you specify. Duplicates wi
 #### --slack/-s
 Look for sensible slack data. Typically hostnames found beyond the current packet.
 #### --mac/-m
-Search for this source MAC address instead of the pool tag. Provide mac address as: `--mac a1b2c3d4e5f6`
+Search for this source MAC address instead of the pool tag. Provide mac address as: `--mac a1B2c3D4e5F6` or `--mac a1:B2:c3:D4:e5:F6`. (Capitalisation doesn't matter.)
 
 ## Sample Output 1
 `$ vol.py --plugins path/to/ndispktscan/ -f memory.dmp --profile Win7SP1x64 ndispktscan --pcap out.pcap --dsts ips.txt`
