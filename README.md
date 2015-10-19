@@ -4,17 +4,18 @@ NDISPktScan is a plugin for the [Volatility Framework](https://github.com/volati
 ## How does it work?
 The [Network Driver Interface Specification](https://en.wikipedia.org/wiki/Network_Driver_Interface_Specification) is an API for network cards used by Windows (and other OSs). On Windows, the API is implemented by ndis.sys which is a [Kernel Mode driver](https://msdn.microsoft.com/en-us/library/windows/hardware/ff554836%28v=vs.85%29.aspx).
 
-NDIS 6.20, the version used by Windows 7 and Windows Server 2008R2, seems to use a [pool tag](http://blogs.technet.com/b/yongrhee/archive/2009/06/24/pool-tag-list.aspx) of `NDsh`. As such, these pool tags can be found, and the data structure that follows, parsed.
+An Ethernet packet, or, depending on the version of Windows, the start of an Ethernet packet, can be found by searching kernel memory space for a source MAC address followed by an [EtherType](https://en.wikipedia.org/wiki/EtherType) of IPv4 or IPv6. As long as the source MAC address is known, the packets can be found and recovered.
+
+Ideally, the source MAC address will be passed to the plugin via the `--mac` switch (see below).
+
+For NDIS 6.20, the version used by Windows 7 and Windows Server 2008R2, the plugin can detect the MAC address by parsing data around what seems to be a [pool tag](http://blogs.technet.com/b/yongrhee/archive/2009/06/24/pool-tag-list.aspx) of `NDsh`.
 
 ## What information can it get?
-The data stored is actually an Ethernet packet. Consequently, the whole packet can be parsed and, optionally, saved to a PCAP file. The plugin will output at least the source and destination MAC addresses and the [EtherType](https://en.wikipedia.org/wiki/EtherType). If the packet is TCP or UDP over IPv4 or IPv6 (as they often are) the plugin will also output the source and destination IP addresses, the source and destination port numbers, and, for TCP, the TCP flags.
+The plugin will output at least the source and destination MAC addresses and the EtherType of any found packets. If the packet is TCP or UDP over IPv4 or IPv6 (as they often are) the plugin will also output the source and destination IP addresses, the source and destination port numbers, and, for TCP, the TCP flags. The packets can optionally be saved to a PCAP file via the `--pcap` switch (see below).
 
-For those with an especially forensic interest, consider the `--slack` option. Each entry seems to be allocated 2048 bytes, therefore, when an entry is reused, if the new data is fewer bytes than what was previously at that position in memory, there is likely slack. The `--slack` option will output only "sensible" data recovered from slack. Typically these will be hostnames.
+For those with an especially forensic interest, consider the `--slack` option. Entries in the NDIS cache (if that is indeed what it is) seem to be reused, meaning that if the new data is fewer bytes than what was previously at that position in memory, there is likely slack. The `--slack` option will output only "sensible" data recovered from slack. Typically these will be hostnames.
 
 In both cases, if an [encoded NetBIOS hostname](https://support.microsoft.com/en-gb/kb/194203) is found, it will be presented encoded, followed by the decoded version in brackets.
-
-### MAC Mode
-In versions of Windows other than 7 or 2008R2, it is probably worth trying the `--mac` option. This option requires the MAC address from a network card in use when the memory sample was taken. The plugin will then look for the MAC address followed by either the IPv4 or IPv6 EtherType and output any packets found. This approach was seen to be surprisingly successful, although the actual payload of the packet seemed to be missing. That said, a destination IP address and port could still be very informative. 
 
 ## How do I use it?
 ### Let Volatility know you're using an additional plugin.
@@ -26,11 +27,14 @@ $ vol.py --plugins=path/to/ndispktscan -f memory.dmp --profile=Win7SP1x64 ndispk
 #### --pcap/-p
 Each found packet will be saved to the PCAP file you specify. The file can then be used by the tool of your choice, for example, [WireShark](https://www.wireshark.org/).
 #### --dsts/-D
-Each target IP address will be saved to the text file you specify. Duplicates will be removed.
+Each target IP address will be saved to the text file you specify; duplicates will be removed.
 #### --slack/-s
 Look for sensible slack data. Typically hostnames found beyond the current packet.
 #### --mac/-m
-Search for this source MAC address instead of the pool tag. Provide mac address as: `--mac a1B2c3D4e5F6` or `--mac a1:B2:c3:D4:e5:F6`. (Capitalisation doesn't matter.)
+Search for this source MAC address. Provide mac address as: `--mac a1B2c3D4e5F6` or `--mac a1:B2:c3:D4:e5:F6`. (Capitalisation doesn't matter.)
+
+## Note
+As the NDIS driver has developed over time, that is, through the different versions of Windows, the amount of the packet seen in kernel space seems to have reduced. For example, in Windows XP, a full GET request can be seen in a packet, in Windows 7, the TCP header is present, but no payload, and in Windows 10, the TCP header seems incomplete. That said, there is still a lot of useful information that can be discerned and WireShark does an excellent job of presenting the data as best it can.
 
 ## Sample Output 1
 `$ vol.py --plugins path/to/ndispktscan/ -f memory.dmp --profile Win7SP1x64 ndispktscan --pcap out.pcap --dsts ips.txt`
@@ -47,7 +51,7 @@ Offset (V)         Source MAC        Destination MAC   Prot Source IP           
 --SNIP--
 0x0000fa8002d64ff8 00:0C:29:84:88:F6 00:50:56:E4:93:7D 0x06 172.16.129.130                          23.38.75.69                             49190    80 ACK
 0x0000fa8003099ff8 00:0C:29:84:88:F6 00:50:56:E4:93:7D 0x06 172.16.129.130                          23.63.99.225                            49166    80 ACK
-Found 426 Things.
+Found 426 packets from 1 MACs.
 Written 426 records (31,569 bytes) to 'out.pcap'.
 Written 35 destination IPs to 'ips.txt'.
 ```
@@ -100,5 +104,5 @@ Offset (V) Source MAC        Destination MAC   Prot Source IP                   
 --SNIP--
 0x88b86aba 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          157.56.194.72                           49410   443 ACK
 0x88b9965a 00:0C:29:83:87:25 00:50:56:E4:93:7D 0x06 172.16.129.129                          23.67.255.203                           49419    80 ACK,PSH
-Found 97 Things.
+Found 97 packets from 1 MACs.
 ```
