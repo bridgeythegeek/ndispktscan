@@ -101,6 +101,17 @@ class _IPv4(obj.CType):
         """Get the packet offset to the payload"""
 
         return self.v() + (self.ihl * 4)
+    
+    def is_valid(self):
+        """Is this a valid IPv4 address?"""
+        
+        if self.src_ip[0] == 0 or self.src_ip[3] == 0:
+            return False
+        
+        if self.dst_ip[0] == 0 or self.dst_ip[3] == 0:
+            return False
+        
+        return True
 
     @staticmethod
     def make_ip(ip):
@@ -268,21 +279,38 @@ class NDshScanner(scan.BaseScanner):
 
 
 class MacScanner(scan.BaseScanner):
-    """Scanner for a MAC address followed by IPv4/IPv6 EtherType"""
+    """Scanner for a MAC address"""
 
     def __init__(self, mac):
-        needles = [ mac + '\x08\x00', mac + '\x86\xdd']
+        needles = [ mac ]
         self.checks = [ ("MultiStringFinderCheck", {'needles':needles}) ]
         scan.BaseScanner.__init__(self)
 
     def scan(self, address_space, offset=0):
         for address in scan.BaseScanner.scan(self, address_space, offset=offset):
-            yield address - 6  # We've hit on source MAC, but destination MAC is first
+            # Try and validate the packet.
+            # 1) Is it the destination mac?
+            eth = obj.Object('_ETHERNET', vm=address_space, offset=address)
+            if eth.eth_type in NDISPktScan._ETH_TYPES:
+                yield eth, address_space.zread(address, 2048)
+                continue
+            # 2) Is it the source mac?
+            eth = obj.Object('_ETHERNET', vm=address_space, offset=address - 6)
+            if eth.eth_type in NDISPktScan._ETH_TYPES:
+                yield eth, address_space.zread(address - 6, 2048)
+                continue
 
 
 class NDISPktScan(common.AbstractWindowsCommand):
     """Extract the packets from memory"""
 
+    _ETH_TYPES = [
+        0x0800,  # IPv4
+        #0x0806,  # ARP
+        #0x8035,  # Reverse ARP
+        0x86dd,  # IPv6
+    ]
+    
     #ip_proto = {
     #    0x00 : "IPv6 Hop-by-Hop Option",
     #    0x01 : "ICMP",
@@ -313,7 +341,7 @@ class NDISPktScan(common.AbstractWindowsCommand):
                           help = 'Look for slack only', action = 'store_true')
 
         config.add_option('MAC', short_option = 'm', default = None,
-                          help = 'Source MAC address to find')
+                          help = 'Source MAC addresses to find (comma separated)')
 
     @staticmethod    
     def trans_netbios(nb_name):
@@ -402,6 +430,10 @@ class NDISPktScan(common.AbstractWindowsCommand):
         if not re.match('^[a-fA-F0-9]{12}$', mac):
             return None
         
+        # ff:ff:ff:ff:ff:ff is only valid as a dst (broadcast)
+        if mac.lower() == 'f' * 12:
+            return None
+        
         return mac.decode('hex')
     
     @staticmethod
@@ -434,10 +466,11 @@ class NDISPktScan(common.AbstractWindowsCommand):
         scanner = NDshScanner()
         for ss in NDISPktScan.gen_session_spaces(addr_space):
             for a in scanner.scan(ss, start):
-                e = obj.Object('_ETHERNET', vm=ss, offset=a+8)
-                if e.eth_type == 0x0800 or e.eth_type == 0x86dd:
-                    str_mac = e.make_mac(e.mac_src)
-                    valid_mac = NDISPktScan.validate_mac(str_mac)
+                # NDsh01000000 seems to be at the end of the page, so -4088
+                e = obj.Object('_ETHERNET', vm=ss, offset=a-4088)
+                if e.eth_type in NDISPktScan._ETH_TYPES:
+                    temp_mac = e.make_mac(e.mac_src)
+                    valid_mac = NDISPktScan.validate_mac(temp_mac)
                     if valid_mac:
                         macs.add(valid_mac)
         
@@ -449,10 +482,15 @@ class NDISPktScan(common.AbstractWindowsCommand):
             debug.error('SLACK can\'t be used with PCAP or DSTS')
         
         # Make sure the MAC address is valid
+        macs = set()
         if self._config.MAC:
-            hex_mac = self.validate_mac(self._config.MAC)
-            if not hex_mac:
-                debug.error('Invalid MAC address')
+            temp_macs = self._config.MAC.split(',')
+            for mac in temp_macs:
+                hex_mac = self.validate_mac(mac)
+                if not hex_mac:
+                    debug.error('Invalid MAC address: {}'.format(mac))
+                else:
+                    macs.add(hex_mac)
     
         # Ensure PCAP file won't overwrite an existing file
         if self._config.PCAP and os.path.exists(self._config.PCAP):
@@ -479,11 +517,9 @@ class NDISPktScan(common.AbstractWindowsCommand):
         if start > 0xffff000000000000:
             start = start & 0x0000ffffffffffff
 
-        macs = set()  # Store the MAC addresses we find
-        if self._config.MAC:
-            macs.add(hex_mac)
-        else:  # No MAC provided, so we'd better try and find one
-            # Attemp 1: NDsh
+        # If we haven't been given a MAC, try and find one
+        if not self._config.MAC:
+            # Attempt 1: NDsh01000000
             new_macs = self.macfind_ndsh(addr_space, start)
             if new_macs:
                 for new_mac in new_macs:
@@ -499,22 +535,19 @@ class NDISPktScan(common.AbstractWindowsCommand):
             for mac in macs:
             
                 scanner = MacScanner(mac)
-            
-                for address in scanner.scan(session_space, offset=start):
+                for eth, raw in scanner.scan(session_space, offset=start):
+                        
+                        # Don't report the same hit twice
+                        if eth.v() in hits:
+                            continue
+                        hits.append(eth.v())
                     
-                    if address in hits:
-                        continue
-                
-                    hits.append(address)
-                    eth = obj.Object('_ETHERNET', vm=session_space, offset=address)
-                    if eth.eth_type == 0x0800 or eth.eth_type == 0x86dd:
-                        
-                        raw = session_space.zread(address, 2048)
-                        
                         # Parse ethernet's payload
                         if eth.eth_type == 0x0800: # IPv4:
                             eth_payload = obj.Object('_IPv4', vm=session_space,
                                 offset = eth.v() + 0x0E)
+                            if not eth_payload.is_valid():
+                                continue
                             end = 14 + eth_payload.length
                             if self._config.SLACK:
                                 yield address, raw[end:end+_MAX_SLACK_LENGTH]
@@ -589,7 +622,7 @@ class NDISPktScan(common.AbstractWindowsCommand):
                 pcap_writer = PcapWriter(self._config.PCAP)
 
             dsts = set()      # Store the unique destination IPs
-            src_macs = set()  # Store the unique source MACs
+            src_macs = {}     # Store the unique source MACs
             count = 0
             for raw, eth, epl, pl in data:
                 count += 1
@@ -600,7 +633,10 @@ class NDISPktScan(common.AbstractWindowsCommand):
                 dst_ip = epl.make_ip(epl.dst_ip)
                 dsts.add(dst_ip)
                 src_mac = eth.make_mac(eth.mac_src)
-                src_macs.add(src_mac)
+                if src_mac in src_macs:
+                    src_macs[src_mac] += 1
+                else:
+                    src_macs[src_mac] = 1
 
                 self.table_row(outfd,
                     eth.v(),
@@ -614,10 +650,13 @@ class NDISPktScan(common.AbstractWindowsCommand):
                     pl.get_flags() if pl else 'own'
                 )
 
-            outfd.write('Found {:,} packets from {:,} MACs.\n'.format(count, len(src_macs)))
+            outfd.write('Found {:,} packets.\n'.format(count))
 
             # Only write the files if we found something
             if count > 0:
+            
+                for i, mac in enumerate(src_macs):
+                    outfd.write('MAC {}: {} ({:,} occurrences)\n'.format(i+1, mac, src_macs[mac]))
 
                 # If save to PCAP, write and report
                 if self._config.PCAP:
